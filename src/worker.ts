@@ -1,42 +1,124 @@
-import express from "express";
+import express, { Response } from "express";
 import { randomUUID } from "crypto";
-import { IPCRequest, IPCResponse } from "./types";
+import { IPCAction, IPCRequest, IPCResponse } from "./types";
 
 const app = express();
 app.use(express.json());
 
-function sendToMaster(action: string, payload?: any): Promise<IPCResponse> {
+type Resolver = (response: IPCResponse<unknown>) => void;
+
+const pending = new Map<string, Resolver>();
+
+process.on("message", (message: IPCResponse<unknown>) => {
+    if (
+        typeof message !== "object" ||
+        message === null ||
+        typeof message.id !== "string"
+    ) {
+        return;
+    }
+
+    const resolver = pending.get(message.id);
+
+    if (!resolver) {
+        return;
+    }
+
+    pending.delete(message.id);
+    resolver(message);
+});
+
+function sendToMaster<T>(
+    action: IPCAction,
+    payload?: unknown
+): Promise<IPCResponse<T>> {
     return new Promise((resolve) => {
-        const id = randomUUID();
+        if (typeof process.send !== "function") {
+            resolve({
+                id: "ipc-unavailable",
+                status: 500,
+                error: "IPC channel is unavailable",
+            });
 
-        const message: IPCRequest = {
-            id,
-            action,
-            payload,
-        };
-
-        process.send?.(message);
-
-        function handler(response: IPCResponse) {
-            if (response.id === id) {
-                process.off("message", handler);
-                resolve(response);
-            }
+            return;
         }
 
-        process.on("message", handler);
+        const id = randomUUID();
+        pending.set(id, resolve as Resolver);
+        process.send({ id, action, payload });
     });
 }
 
-app.get("/health", async (req, res) => {
-    const response = await sendToMaster("PlaceHolder");
+function sendResult<T>(res: Response, ipcResponse: IPCResponse<T>): void {
+    if (ipcResponse.status >= 400) {
+        res.status(ipcResponse.status).json({
+            error: ipcResponse.error ?? "Request failed",
+        });
+        return;
+    }
 
-    res.status(response.status).json(response);
+    res.status(ipcResponse.status).json(ipcResponse.data);
+}
+
+async function forward<T>(
+    res: Response,
+    action: IPCAction,
+    payload?: unknown
+): Promise<void> {
+    try {
+        const response = await sendToMaster<T>(action, payload);
+        sendResult(res, response);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : "Unexpected error";
+        res.status(500).json({ error: message });
+    }
+}
+
+app.get("/health", async (_req, res) => {
+    await forward(res, "PING");
 });
 
-app.post("/echo", async (req, res) => {
-    const response = await sendToMaster("ECHO", req.body);
-    res.status(response.status).json(response);
+app.get("/stocks", async (_req, res) => {
+    await forward(res, "GET_BANK");
+});
+
+app.post("/stocks", async (req, res) => {
+    await forward(res, "SET_BANK", req.body);
+});
+
+app.get("/wallets/:walletId", async (req, res) => {
+    await forward(res, "GET_WALLET", {
+        walletId: req.params.walletId,
+    });
+});
+
+app.get("/wallets/:walletId/stocks/:stockName", async (req, res) => {
+    await forward(res, "GET_WALLET_STOCK", {
+        walletId: req.params.walletId,
+        stockName: req.params.stockName,
+    });
+});
+
+app.post("/wallets/:walletId/stocks/:stockName", async (req, res) => {
+    await forward(res, "TRADE_STOCK", {
+        walletId: req.params.walletId,
+        stockName: req.params.stockName,
+        type: req.body?.type,
+    });
+});
+
+app.post("/chaos", (_req, res) => {
+    res.status(200).json({ ok: true });
+
+    res.once("finish", () => {
+        setTimeout(() => {
+            process.exit(1);
+        }, 25);
+    });
+});
+
+app.get("/log", async (_req, res) => {
+    await forward(res, "GET_LOG");
 });
 
 export function startWorker(port: number) {
