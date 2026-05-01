@@ -18,6 +18,16 @@ npm run dev
 Application runs on:
 http://localhost:3000
 
+## Custom port
+
+You can run the application on a custom port:
+
+Linux/macOS:
+PORT=4000 npm run dev
+
+Windows (PowerShell):
+$env:PORT=4000; npm run dev
+
 ## API
 
 POST /stocks
@@ -77,6 +87,10 @@ Kills a worker process (simulates failure)
 - Workers handle HTTP requests
 - Workers communicate with master via IPC
 
+
+
 ## Notes
 
 This solution uses in-memory storage for simplicity.
+
+
